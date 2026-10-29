@@ -17,7 +17,19 @@ const CFG = {
   TOKEN_HEADER: 'QR TOKEN',
   EMAIL_STATUS_HEADER: 'TICKET EMAIL STATUS',
   CHECKIN_STATUS_HEADER: 'CHECK-IN STATUS',
-  CHECKIN_TIME_HEADER: 'CHECK-IN TIME'
+  CHECKIN_TIME_HEADER: 'CHECK-IN TIME',
+  PAYMENT_STATUS_HEADER: 'PAYMENT STATUS',
+  TRANSACTION_HEADER: 'UTR / TRANSACTION ID'
+};
+
+const EVENT = {
+  NAME: 'DDLJ Diwali Sundowner',
+  DATE: '01 November 2026',
+  VENUE: 'Arunodaya Farms',
+  ENTRY_TIME: '5:00 PM onwards',
+  PASS_PRICE: '₹999 per person',
+  INSTAGRAM_LABEL: '@trustfbabies',
+  INSTAGRAM_URL: 'https://www.instagram.com/trustfundbabies/'
 };
 
 
@@ -29,7 +41,11 @@ function onOpen() {
     .addItem('2. Setup check-in system', 'setupQrCheckIn')
     .addSeparator()
     .addItem('Send ticket for selected row (test)', 'sendTicketForSelectedRow')
+    .addItem('Send test-format ticket to Sahil (registered row required)', 'sendTestQrEmailToSahil')
     .addItem('Send all pending tickets', 'sendPendingTickets')
+    .addSeparator()
+    .addItem('Mark selected payment CONFIRMED', 'markSelectedPaymentConfirmed')
+    .addItem('Mark selected payment PENDING', 'markSelectedPaymentPending')
     .addToUi();
 }
 
@@ -173,8 +189,34 @@ function sendTicketForSelectedRow() {
 }
 
 
+/* Manually verify a payment after checking its UTR and payment screenshot. */
+function markSelectedPaymentConfirmed() {
+  setSelectedPaymentStatus_('CONFIRMED');
+}
+
+/* Revoke entry eligibility while payment remains unresolved. */
+function markSelectedPaymentPending() {
+  setSelectedPaymentStatus_('PENDING');
+}
+
+function setSelectedPaymentStatus_(status) {
+  const sheet = SpreadsheetApp.getActiveSheet();
+  if (!sheet || sheet.getName() !== CFG.SHEET_NAME) {
+    throw new Error('Open the Form Responses 1 sheet and select a registrant row.');
+  }
+
+  const row = sheet.getActiveRange() ? sheet.getActiveRange().getRow() : 0;
+  if (row < 2) throw new Error('Select a registrant row, not the header row.');
+
+  const cols = ensureSystemColumns_(sheet);
+  const paymentCol = cols[headerKey_(CFG.PAYMENT_STATUS_HEADER)];
+  sheet.getRange(row, paymentCol).setValue(status);
+  notify_('Payment status for row ' + row + ' set to ' + status + '.');
+}
+
+
 /* Creates a unique ticket and emails its QR image. */
-function issueTicketForRow_(sheet, row) {
+function issueTicketForRow_(sheet, row, forceSend) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
 
@@ -190,6 +232,11 @@ function issueTicketForRow_(sheet, row) {
     const ticketCol = cols[headerKey_(CFG.TICKET_ID_HEADER)];
     const tokenCol = cols[headerKey_(CFG.TOKEN_HEADER)];
     const statusCol = cols[headerKey_(CFG.EMAIL_STATUS_HEADER)];
+    const paymentStatusCol = cols[headerKey_(CFG.PAYMENT_STATUS_HEADER)];
+
+    if (!String(sheet.getRange(row, paymentStatusCol).getDisplayValue()).trim()) {
+      sheet.getRange(row, paymentStatusCol).setValue('PENDING');
+    }
 
     const email = String(
       sheet.getRange(row, emailCol).getDisplayValue()
@@ -199,7 +246,7 @@ function issueTicketForRow_(sheet, row) {
       sheet.getRange(row, statusCol).getDisplayValue()
     ).trim().toUpperCase();
 
-    if (status === 'SENT') {
+    if (status === 'SENT' && !forceSend) {
       return 'SKIPPED';
     }
 
@@ -240,46 +287,26 @@ function issueTicketForRow_(sheet, row) {
     try {
       const qrBlob = createQrImage_(token, ticketId);
 
-      const subject =
-        'Your HOUSE001 Early Bird Registration QR Ticket';
+      const subject = 'Your ' + EVENT.NAME + ' Registration & QR Ticket';
 
-      const plainBody =
-        'Hello ' + name + ',\n\n' +
-        'Your registration QR ticket is ready.\n\n' +
-        'Ticket ID: ' + ticketId + '\n\n' +
-        'Show the QR code in this email to the event check-in staff.\n' +
-        'Keep your ticket private and do not share it with other attendees.\n\n' +
-        'Regards,\nTrust Fund Babies';
+      const transactionCol = cols[headerKey_(CFG.TRANSACTION_HEADER)] || 0;
+      const transactionRef = transactionCol
+        ? String(sheet.getRange(row, transactionCol).getDisplayValue()).trim()
+        : '';
 
-      const htmlBody = `
-        <div style="font-family:Arial,sans-serif;color:#222;max-width:560px;margin:auto;">
-          <h2 style="margin-bottom:4px;">HOUSE001</h2>
-          <p style="color:#666;margin-top:0;">EARLY BIRD REGISTRATION</p>
+      const paymentCol = cols[headerKey_(CFG.PAYMENT_STATUS_HEADER)];
+      const paymentStatus = String(
+        sheet.getRange(row, paymentCol).getDisplayValue()
+      ).trim().toUpperCase() || 'PENDING';
 
-          <p>Hello ${escapeHtml_(name)},</p>
-
-          <p>Your registration QR ticket is ready.</p>
-
-          <div style="padding:18px;border:1px solid #ddd;border-radius:12px;text-align:center;">
-            <p style="margin:0 0 8px;"><b>YOUR ENTRY TICKET</b></p>
-            <p style="color:#555;">Ticket ID: ${escapeHtml_(ticketId)}</p>
-            <img src="cid:ticketQr"
-              alt="Your unique QR ticket"
-              width="280"
-              height="280"
-              style="max-width:100%;height:auto;">
-            <p style="font-size:13px;color:#666;">
-              Present this QR code to the authorised check-in staff.
-            </p>
-          </div>
-
-          <p><b>Important:</b> This ticket is unique to your registration.
-          Do not share or reuse it.</p>
-
-          <p>Regards,<br><b>Trust Fund Babies</b></p>
-        </div>
-      `;
-
+      const emailContent = buildRegistrationEmail_({
+        name: name,
+        ticketId: ticketId,
+        transactionRef: transactionRef,
+        paymentStatus: paymentStatus
+      });
+      const plainBody = emailContent.plainBody;
+      const htmlBody = emailContent.htmlBody;
       // This email is sent from the account running this function/trigger.
       GmailApp.sendEmail(email, subject, plainBody, {
         name: 'Trust Fund Babies',
@@ -337,14 +364,9 @@ function createQrImage_(token, ticketId) {
 
 /* Serves the staff camera-scanning page. */
 function doGet() {
-  return HtmlService.createTemplateFromFile('Index')
-    .evaluate()
+  return HtmlService.createHtmlOutputFromFile('Index')
     .setTitle('TFB QR Check-In')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-}
-
-function include(filename) {
-  return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
 
@@ -436,6 +458,20 @@ function checkInTicket(token, pin) {
         ok: false,
         code: 'NOT_ISSUED',
         message: 'This ticket has not been issued successfully.'
+      };
+    }
+
+    const paymentStatusCol = cols[headerKey_(CFG.PAYMENT_STATUS_HEADER)];
+    const paymentStatus = String(
+      sheet.getRange(row, paymentStatusCol).getDisplayValue()
+    ).trim().toUpperCase() || 'PENDING';
+
+    if (paymentStatus !== 'CONFIRMED') {
+      return {
+        ok: false,
+        code: 'PAYMENT_PENDING',
+        message: 'PAYMENT VERIFICATION PENDING',
+        detail: 'Registration found, but entry is blocked until the organiser marks payment CONFIRMED.'
       };
     }
 
@@ -536,7 +572,8 @@ function ensureSystemColumns_(sheet) {
     CFG.TOKEN_HEADER,
     CFG.EMAIL_STATUS_HEADER,
     CFG.CHECKIN_STATUS_HEADER,
-    CFG.CHECKIN_TIME_HEADER
+    CFG.CHECKIN_TIME_HEADER,
+    CFG.PAYMENT_STATUS_HEADER
   ];
 
   const lastCol = Math.max(sheet.getLastColumn(), 1);
@@ -556,6 +593,16 @@ function ensureSystemColumns_(sheet) {
       const newColumn = sheet.getLastColumn() + 1;
       sheet.getRange(1, newColumn).setValue(header);
       existing.add(headerKey_(header));
+
+      // New payment-status cells default to PENDING until the organiser
+      // verifies the transaction reference and uploaded payment screenshot.
+      if (headerKey_(header) === headerKey_(CFG.PAYMENT_STATUS_HEADER)) {
+        const lastRow = sheet.getLastRow();
+        if (lastRow >= 2) {
+          sheet.getRange(2, newColumn, lastRow - 1, 1)
+            .setValues(Array.from({length: lastRow - 1}, () => ['PENDING']));
+        }
+      }
     }
   });
 
@@ -634,57 +681,185 @@ function notify_(message) {
   }
 }
 
+/**
+ * Sends the same real-looking confirmation + QR email to Sahil for preview.
+ * This requires Sahil's email to be present in the EMAIL ADDRESS column.
+ * It reuses that registration's real ticket token, so it can be verified
+ * by the scanner; the scanner will still block entry if payment is PENDING.
+ */
 function sendTestQrEmailToSahil() {
-  const recipient = 'sahilsharma361004@gmail.com';
+  const sheet = getResponseSheet_();
+  const cols = ensureSystemColumns_(sheet);
+  const emailCol = cols[headerKey_(CFG.EMAIL_HEADER)];
+  let matchingRow = 0;
 
-  // Generate a unique token for this email test.
-  const token =
-    Utilities.getUuid().replace(/-/g, '') +
-    Utilities.getUuid().replace(/-/g, '');
+  for (let row = 2; row <= sheet.getLastRow(); row++) {
+    const email = String(sheet.getRange(row, emailCol).getDisplayValue())
+      .trim().toLowerCase();
+    if (email === 'sahilsharma361004@gmail.com') {
+      matchingRow = row;
+      break;
+    }
+  }
 
-  const ticketId =
-    'TFB-TEST-' + token.substring(0, 8).toUpperCase();
+  if (!matchingRow) {
+    throw new Error(
+      'No registration was found for sahilsharma361004@gmail.com in the EMAIL ADDRESS column. ' +
+      'Submit the form with this address first; then run this function again.'
+    );
+  }
 
-  // Use the QR-generation function already in Code.gs.
-  const qrBlob = createQrImage_(token, ticketId);
+  const result = issueTicketForRow_(sheet, matchingRow, true);
+  notify_(
+    result === 'SENT'
+      ? 'The realistic registration + QR email was sent to Sahil using his registered ticket.'
+      : 'Email result: ' + result + '. Check TICKET EMAIL STATUS and Executions for details.'
+  );
+}
 
-  const subject = 'TFB QR Ticket - Email Delivery Test';
+
+/**
+ * Builds the same minimal, realistic email for both actual attendees and the
+ * Sahil preview. Event details appear before the QR code as requested.
+ */
+function buildRegistrationEmail_(data) {
+  const name = escapeHtml_(data.name || 'Participant');
+  const ticketId = escapeHtml_(data.ticketId || '');
+  const transactionRef = escapeHtml_(data.transactionRef || 'Not provided');
+  const paymentStatus = String(data.paymentStatus || 'PENDING').toUpperCase();
+  const paymentConfirmed = paymentStatus === 'CONFIRMED';
+  const paymentTitle = paymentConfirmed
+    ? 'PAYMENT VERIFIED'
+    : 'PAYMENT VERIFICATION PENDING';
+  const paymentMessage = paymentConfirmed
+    ? 'Your payment has been verified. Keep this email and present the QR below at entry.'
+    : 'We have received your registration. Our team will verify your transaction reference and payment screenshot. Entry is approved only after successful payment verification.';
 
   const plainBody =
-    'Hello Sahil,\n\n' +
-    'This is a test of the Trust Fund Babies QR-ticket email system.\n\n' +
-    'Test Ticket ID: ' + ticketId + '\n\n' +
-    'This QR is for testing email delivery only. ' +
-    'It is not a valid event-entry ticket.\n\n' +
-    'Trust Fund Babies';
+    'TRUST FUND BABIES — EVENT REGISTRATION\n\n' +
+    'Registration received, ' + (data.name || 'Participant') + '.\n' +
+    'Thank you for registering for ' + EVENT.NAME + '.\n\n' +
+    'YOUR EVENT DETAILS\n' +
+    'Guest name: ' + (data.name || 'Participant') + '\n' +
+    'Event: ' + EVENT.NAME + '\n' +
+    'Date: ' + EVENT.DATE + '\n' +
+    'Venue: ' + EVENT.VENUE + '\n' +
+    'Entry: ' + EVENT.ENTRY_TIME + '\n' +
+    'Pass price: ' + EVENT.PASS_PRICE + '\n' +
+    'Transaction reference: ' + (data.transactionRef || 'Not provided') + '\n\n' +
+    paymentTitle + '\n' + paymentMessage + '\n\n' +
+    'YOUR QR TICKET\n' +
+    'Ticket ID: ' + (data.ticketId || '') + '\n' +
+    'Present the QR image in this email to the authorised entry staff. Keep it private and do not share it.\n\n' +
+    'Follow ' + EVENT.INSTAGRAM_LABEL + ': ' + EVENT.INSTAGRAM_URL + '\n\n' +
+    'TFB — TRUST FUND BABIES\n' +
+    'All confirmed passes are non-refundable. Please retain your transaction reference.';
+
+  const pink = '#f02e9d';
+  const paymentBg = paymentConfirmed ? '#effaf3' : '#fff3f8';
+  const paymentColor = paymentConfirmed ? '#137a3c' : '#b31665';
+  const safeInstagramUrl = EVENT.INSTAGRAM_URL;
 
   const htmlBody = `
-    <div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#222;">
-      <h2>TRUST FUND BABIES</h2>
-      <p>QR TICKET SYSTEM TEST</p>
-      <hr>
-      <p>Hello Sahil,</p>
-      <p>This is a test email to verify that the QR-ticket system is working.</p>
-      <div style="border:1px solid #ddd;border-radius:12px;padding:20px;text-align:center;">
-        <h3>TEST QR CODE</h3>
-        <p><b>Ticket ID:</b> ${ticketId}</p>
-        <img src="cid:testQr" width="280" height="280"
-             alt="Test QR code" style="max-width:100%;height:auto;">
-        <p style="color:#b3261e;font-weight:bold;">
-          TEST ONLY — NOT VALID FOR EVENT ENTRY
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml_(EVENT.NAME)} — Registration</title>
+</head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#19131a;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+    Your registration details and unique QR ticket for ${escapeHtml_(EVENT.NAME)}.
+  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f3f4f6;padding:20px 8px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:560px;background:#ffffff;border-collapse:separate;border-spacing:0;">
+          <tr>
+            <td style="padding:20px 24px;background:#171018;border-bottom:4px solid ${pink};">
+              <div style="font-size:16px;font-weight:800;letter-spacing:2px;color:${pink};">TRUST FUND BABIES</div>
+              <div style="font-size:11px;letter-spacing:1.5px;color:#f8edf4;margin-top:5px;">EVENT REGISTRATION</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px;background:#fff7fb;">
+              <div style="font-size:11px;font-weight:800;letter-spacing:2px;color:${pink};">REGISTRATION RECEIVED</div>
+              <h1 style="margin:10px 0 10px;font-size:25px;line-height:1.25;color:#211521;">You're registered, ${name}.</h1>
+              <p style="margin:0;font-size:15px;line-height:1.65;color:#403640;">
+                Thank you for registering for <strong style="color:${pink};">${escapeHtml_(EVENT.NAME)}</strong>.
+                Your registration details are below.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:22px 24px 14px;">
+              <h2 style="margin:0 0 14px;font-size:15px;letter-spacing:.3px;color:#211521;">YOUR EVENT DETAILS</h2>
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;font-size:14px;">
+                ${emailDetailRow_('Guest name', name)}
+                ${emailDetailRow_('Event', escapeHtml_(EVENT.NAME))}
+                ${emailDetailRow_('Date', escapeHtml_(EVENT.DATE))}
+                ${emailDetailRow_('Venue', escapeHtml_(EVENT.VENUE))}
+                ${emailDetailRow_('Entry', escapeHtml_(EVENT.ENTRY_TIME))}
+                ${emailDetailRow_('Pass price', '<strong style="color:' + pink + ';">' + escapeHtml_(EVENT.PASS_PRICE) + '</strong>')}
+                ${emailDetailRow_('Transaction ref.', transactionRef)}
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 24px 20px;">
+              <div style="padding:14px 16px;border-left:4px solid ${pink};background:${paymentBg};">
+                <div style="font-size:12px;font-weight:800;letter-spacing:.7px;color:${paymentColor};">${paymentTitle}</div>
+                <p style="margin:7px 0 0;font-size:13px;line-height:1.6;color:#403640;">${paymentMessage}</p>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 24px 24px;">
+              <div style="border:1px solid #eadfe7;border-radius:10px;padding:18px;text-align:center;">
+                <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;color:${pink};">YOUR QR TICKET</div>
+                <div style="margin-top:8px;font-size:13px;color:#635663;">Ticket ID: <strong style="color:#211521;">${ticketId}</strong></div>
+                <img src="cid:ticketQr" width="220" height="220" alt="Your unique registration QR code" style="display:block;width:220px;height:220px;max-width:100%;margin:14px auto 8px;border:0;">
+                <p style="margin:0;font-size:12px;line-height:1.6;color:#635663;">
+                  Keep this QR private and show it to the authorised entry team.
+                  ${paymentConfirmed ? 'Your payment is verified; your ticket is eligible for check-in.' : 'This QR will not be accepted at entry until your payment is marked CONFIRMED by the organiser.'}
+                </p>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 24px 24px;">
+              <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#403640;">See you at the sundowner.</p>
+              <a href="${safeInstagramUrl}" style="display:inline-block;padding:10px 15px;background:${pink};border-radius:4px;color:#ffffff;text-decoration:none;font-size:13px;font-weight:700;">Follow ${EVENT.INSTAGRAM_LABEL}</a>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:17px 24px;background:#171018;border-top:3px solid ${pink};">
+              <div style="font-size:12px;font-weight:800;letter-spacing:.6px;color:${pink};">TFB — TRUST FUND BABIES</div>
+              <p style="margin:8px 0 0;font-size:11px;line-height:1.6;color:#f4eaf2;">
+                Please retain your transaction reference. All confirmed passes are non-refundable.
+              </p>
+            </td>
+          </tr>
+        </table>
+        <p style="max-width:560px;margin:12px auto 0;font-size:10px;line-height:1.5;color:#777;text-align:center;">
+          This is an automated registration acknowledgement. Payment status is shown above.
         </p>
-      </div>
-      <p>Trust Fund Babies</p>
-    </div>
-  `;
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
 
-  GmailApp.sendEmail(recipient, subject, plainBody, {
-    name: 'Trust Fund Babies',
-    htmlBody: htmlBody,
-    inlineImages: {
-      testQr: qrBlob
-    }
-  });
+  return {plainBody: plainBody, htmlBody: htmlBody};
+}
 
-  console.log('Test QR email sent to ' + recipient);
+
+function emailDetailRow_(label, valueHtml) {
+  return '<tr>' +
+    '<td style="width:38%;padding:9px 0;border-bottom:1px solid #eee3eb;color:#776b76;vertical-align:top;">' +
+    escapeHtml_(label) + '</td>' +
+    '<td style="padding:9px 0;border-bottom:1px solid #eee3eb;color:#211521;vertical-align:top;">' +
+    valueHtml + '</td>' +
+    '</tr>';
 }
