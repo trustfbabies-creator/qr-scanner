@@ -1,1 +1,187 @@
-<!--  -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101114">
+  <meta name="description" content="Trust Fund Babies event registration QR check-in desk.">
+  <title>TFB | QR Check-In</title>
+
+  <link rel="stylesheet" href="./style.css">
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" defer></script>
+  <script src="./script.js" defer></script>
+</head>
+
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="Trust Fund Babies check-in home">
+        <span class="brand-mark" aria-hidden="true">TFB</span>
+        <span class="brand-copy">
+          <strong>TRUST FUND BABIES</strong>
+          <span>EVENT OPERATIONS</span>
+        </span>
+      </a>
+
+      <div class="system-status" id="system-status" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="system-status-text">System not connected</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="page-heading" aria-labelledby="page-title">
+        <p class="eyebrow">HOUSE001 · EARLY BIRD REGISTRATION</p>
+        <h1 id="page-title">QR Check-In</h1>
+        <p class="page-intro">
+          Verify each attendee's ticket before allowing entry. Every ticket can be accepted once.
+        </p>
+      </section>
+
+      <div class="checkin-layout">
+        <section class="panel scanner-panel" aria-labelledby="scanner-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">ENTRY DESK</p>
+              <h2 id="scanner-heading">Scan attendee ticket</h2>
+            </div>
+            <span class="panel-index" aria-hidden="true">01</span>
+          </div>
+
+          <div class="staff-access">
+            <label for="staff-pin">Staff access code</label>
+            <div class="input-row">
+              <input
+                id="staff-pin"
+                name="staff-pin"
+                type="password"
+                autocomplete="current-password"
+                placeholder="Enter staff access code"
+                aria-describedby="staff-pin-help"
+                required
+              >
+              <button id="toggle-pin" class="button button-quiet" type="button"
+                aria-label="Show staff access code" aria-pressed="false">Show</button>
+            </div>
+            <p class="field-help" id="staff-pin-help">
+              For authorised event staff only. Do not share the access code with attendees.
+            </p>
+          </div>
+
+          <div class="scanner-actions">
+            <button id="start-scanner" class="button button-primary" type="button">
+              Start camera
+            </button>
+            <button id="stop-scanner" class="button button-secondary" type="button" disabled>
+              Stop camera
+            </button>
+          </div>
+
+          <div class="scanner-frame">
+            <div id="qr-reader" aria-label="QR code camera scanning area"></div>
+            <p class="scanner-caption" id="scanner-caption">
+              The camera preview will appear here after you start scanning.
+            </p>
+          </div>
+
+          <p class="privacy-note">
+            Camera access requires this page to be served over HTTPS. Allow camera permission when prompted.
+          </p>
+        </section>
+
+        <section class="panel result-panel" aria-labelledby="result-panel-heading">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">VALIDATION</p>
+              <h2 id="result-panel-heading">Check-in result</h2>
+            </div>
+            <span class="panel-index" aria-hidden="true">02</span>
+          </div>
+
+          <div id="result-card" class="result-card is-idle" role="status" aria-live="polite" aria-atomic="true">
+            <span class="result-symbol" id="result-symbol" aria-hidden="true">—</span>
+            <p class="result-label" id="result-label">READY TO SCAN</p>
+            <h3 id="result-title">Waiting for a ticket</h3>
+            <p id="result-message">
+              Enter the staff access code and start the camera to verify an attendee.
+            </p>
+          </div>
+
+          <section id="ticket-details" class="ticket-details" aria-labelledby="ticket-details-heading" hidden>
+            <h3 id="ticket-details-heading">Ticket details</h3>
+            <dl>
+              <div class="detail-row">
+                <dt>Attendee</dt>
+                <dd id="ticket-name">—</dd>
+              </div>
+              <div class="detail-row">
+                <dt>Ticket ID</dt>
+                <dd id="ticket-id">—</dd>
+              </div>
+              <div class="detail-row">
+                <dt>Check-in time</dt>
+                <dd id="checkin-time">—</dd>
+              </div>
+            </dl>
+          </section>
+
+          <div class="divider" role="separator"><span>OR ENTER CODE MANUALLY</span></div>
+
+          <form id="manual-ticket-form" class="manual-ticket-form">
+            <label for="manual-token">Ticket token</label>
+            <input
+              id="manual-token"
+              name="manual-token"
+              type="text"
+              inputmode="text"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              placeholder="Paste the QR token"
+            >
+            <button id="verify-manual-ticket" class="button button-secondary" type="submit">
+              Verify ticket
+            </button>
+            <p class="field-help">
+              Use this only when the camera cannot read a ticket.
+            </p>
+          </form>
+        </section>
+      </div>
+
+      <section class="panel activity-panel" aria-labelledby="activity-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">THIS SESSION</p>
+            <h2 id="activity-heading">Recent scans</h2>
+          </div>
+          <span class="scan-count" id="scan-count">0 scans</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="activity-table">
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">Ticket ID</th>
+                <th scope="col">Attendee</th>
+                <th scope="col">Result</th>
+              </tr>
+            </thead>
+            <tbody id="recent-scans-body">
+              <tr id="empty-scans-row">
+                <td colspan="4" class="empty-state">No tickets scanned in this session yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>TRUST FUND BABIES</span>
+      <span>Authorised check-in staff only</span>
+    </footer>
+  </div>
+</body>
+</html>
