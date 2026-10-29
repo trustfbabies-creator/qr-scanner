@@ -1,4 +1,4 @@
-* TRUST FUND BABIES — QR CHECK-IN UI
+/* TRUST FUND BABIES — QR CHECK-IN UI
    Responsive dark operations dashboard with neon-lime and magenta accents. */
 
 :root {
@@ -437,3 +437,4 @@ input:focus {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
