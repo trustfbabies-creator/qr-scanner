@@ -116,14 +116,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed' });
   }
 
-  if (!APPS_SCRIPT_URL || !SHARED_SECRET) {
-    return res.status(500).json({
-      ok: false,
-      code: 'CONFIG_ERROR',
-      message: 'Server configuration error: TFB_APPS_SCRIPT_URL or TFB_API_SECRET not set in Vercel environment.'
-    });
-  }
-
   const { action, token, pin } = req.body || {};
 
   if (!action || String(action).toLowerCase() !== 'checkin') {
@@ -159,6 +151,14 @@ export default async function handler(req, res) {
       ok: false,
       code: 'PAYLOAD_TOO_LARGE',
       message: 'Input exceeds maximum permitted length.'
+    });
+  }
+
+  if (!APPS_SCRIPT_URL || !SHARED_SECRET) {
+    return res.status(500).json({
+      ok: false,
+      code: 'CONFIG_ERROR',
+      message: 'Server configuration error: TFB_APPS_SCRIPT_URL or TFB_API_SECRET not set in Vercel environment.'
     });
   }
 
