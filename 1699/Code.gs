@@ -1160,3 +1160,4 @@ function jsonResponse1699_(value) {
   return ContentService.createTextOutput(JSON.stringify(value))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
