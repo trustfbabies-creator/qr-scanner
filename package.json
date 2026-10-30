@@ -1,0 +1,9 @@
+{
+  "name": "tfb-qr-scanner",
+  "version": "1.0.0",
+  "description": "Trust Fund Babies QR Check-In Desk",
+  "type": "module",
+  "scripts": {
+    "test": "node --check api/checkin.js"
+  }
+}
