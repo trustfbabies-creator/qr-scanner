@@ -29,7 +29,7 @@ const EVENT = {
   ENTRY_TIME: '5:00 PM onwards',
   PASS_PRICE: '₹999 per person',
   INSTAGRAM_LABEL: '@trustfbabies',
-  INSTAGRAM_URL: 'https://www.instagram.com/trustfundbabies/'
+  INSTAGRAM_URL: 'https://www.instagram.com/trustfbabies/'
 };
 
 
@@ -39,9 +39,11 @@ function onOpen() {
     .createMenu('TFB QR Check-In')
     .addItem('1. Set staff access code', 'setCheckInPin')
     .addItem('2. Setup check-in system', 'setupQrCheckIn')
+    .addItem('3. Set Vercel API shared secret', 'setVercelApiSecret')
     .addSeparator()
     .addItem('Send ticket for selected row (test)', 'sendTicketForSelectedRow')
     .addItem('Send test-format ticket to Sahil (registered row required)', 'sendTestQrEmailToSahil')
+    .addItem('Send official functional QR test to Alizar', 'sendOfficialTestTicketToAlizar')
     .addItem('Send all pending tickets', 'sendPendingTickets')
     .addSeparator()
     .addItem('Mark selected payment CONFIRMED', 'markSelectedPaymentConfirmed')
@@ -73,6 +75,27 @@ function setCheckInPin() {
     .setProperty('CHECKIN_PIN', pin);
 
   ui.alert('Staff access code saved.');
+}
+
+
+/* Store the server-to-server secret used by the Vercel API. */
+function setVercelApiSecret() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Set Vercel API shared secret',
+    'Paste a randomly generated secret of at least 32 characters. Enter the exact same value in Vercel Environment Variables as TFB_API_SECRET. Do not put it in script.js or GitHub.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const secret = response.getResponseText().trim();
+  if (secret.length < 32) {
+    ui.alert('The shared secret must be at least 32 characters. Nothing was saved.');
+    return;
+  }
+
+  PropertiesService.getScriptProperties().setProperty('TFB_API_SECRET', secret);
+  ui.alert('Vercel API shared secret saved in Script Properties. Add the same value to Vercel as TFB_API_SECRET, then redeploy Vercel.');
 }
 
 
@@ -362,172 +385,216 @@ function createQrImage_(token, ticketId) {
 }
 
 
-/* Serves the staff camera-scanning page. */
-function doGet() {
-  return HtmlService.createHtmlOutputFromFile('Index')
+/*
+ * Serves the staff camera-scanning page through Apps Script HTML Service.
+ * createTemplateFromFile is required because Index.html uses <?!= include(...) ?>.
+ */
+function doGet(e) {
+  if (e && e.parameter && String(e.parameter.action || '').toLowerCase() === 'health') {
+    return jsonResponse_({ ok: true, service: 'TFB QR Check-In', timestamp: new Date().toISOString() });
+  }
+
+  return HtmlService.createTemplateFromFile('Index')
+    .evaluate()
     .setTitle('TFB QR Check-In')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
+/* Loads script.html or style.html into the Index template. */
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
 
 /*
- * Called by the scanner page.
- * Requires the private staff access code and prevents duplicate check-ins.
+ * Authenticated API endpoint for a Vercel serverless function.
+ * Set TFB_API_SECRET in Apps Script Script Properties and the same value
+ * in Vercel Environment Variables. Never put the secret in browser JS/GitHub.
+ */
+function doPost(e) {
+  try {
+    const raw = e && e.postData && e.postData.contents ? e.postData.contents : '{}';
+    const data = JSON.parse(raw);
+    const expectedSecret = PropertiesService.getScriptProperties().getProperty('TFB_API_SECRET');
+
+    const providedSecret = String(data.sharedSecret || data.apiSecret || '');
+    if (!expectedSecret || !providedSecret || providedSecret !== expectedSecret) {
+      return jsonResponse_({ ok: false, code: 'AUTH_FAILED', message: 'Backend authentication failed.' });
+    }
+
+    if (String(data.action || '').toLowerCase() !== 'checkin') {
+      return jsonResponse_({ ok: false, code: 'INVALID_ACTION', message: 'Unsupported API action.' });
+    }
+
+    const result = checkInTicket(data.token, data.pin);
+    return jsonResponse_(result);
+  } catch (error) {
+    Logger.log('API request failed: ' + (error && error.stack ? error.stack : error));
+    return jsonResponse_({ ok: false, code: 'SYSTEM_ERROR', message: 'The check-in request could not be processed.' });
+  }
+}
+
+function jsonResponse_(value) {
+  return ContentService.createTextOutput(JSON.stringify(value))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+
+/*
+ * Called by the Apps Script scanner page or authenticated Vercel API.
+ * Real attendee registrations are checked first. The separate test sheet is
+ * checked second, so Alizar's test QR can exercise the scanner without being
+ * inserted into or counted as an attendee form response.
  */
 function checkInTicket(token, pin) {
-  const expectedPin = PropertiesService.getScriptProperties()
-    .getProperty('CHECKIN_PIN');
+  const expectedPin = PropertiesService.getScriptProperties().getProperty('CHECKIN_PIN');
 
   if (!expectedPin) {
-    return {
-      ok: false,
-      code: 'SETUP_REQUIRED',
-      message: 'Staff access code has not been configured.'
-    };
+    return { ok: false, code: 'SETUP_REQUIRED', message: 'Staff access code has not been configured.' };
   }
-
   if (String(pin || '') !== expectedPin) {
-    return {
-      ok: false,
-      code: 'AUTH_FAILED',
-      message: 'Incorrect staff access code.'
-    };
+    return { ok: false, code: 'AUTH_FAILED', message: 'Incorrect staff access code.' };
   }
 
   const qrToken = String(token || '').trim();
-
   if (!qrToken) {
-    return {
-      ok: false,
-      code: 'INVALID',
-      message: 'Empty or invalid QR code.'
-    };
+    return { ok: false, code: 'INVALID', message: 'Empty or invalid QR code.' };
   }
 
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
 
   try {
-    const sheet = getResponseSheet_();
+    const ss = getSpreadsheet_();
+    const sheet = ss.getSheetByName(CFG.SHEET_NAME);
+    if (!sheet) throw new Error('Missing response sheet: ' + CFG.SHEET_NAME);
     const cols = ensureSystemColumns_(sheet);
 
-    if (sheet.getLastRow() < 2) {
-      return {
-        ok: false,
-        code: 'INVALID',
-        message: 'No registrations found.'
-      };
-    }
+    // First check genuine form registrations.
+    if (sheet.getLastRow() >= 2) {
+      const tokenCol = cols[headerKey_(CFG.TOKEN_HEADER)];
+      const tokenValues = sheet.getRange(2, tokenCol, sheet.getLastRow() - 1, 1).getDisplayValues();
+      let matchRow = 0;
+      for (let i = 0; i < tokenValues.length; i++) {
+        if (String(tokenValues[i][0]).trim() === qrToken) {
+          matchRow = i + 2;
+          break;
+        }
+      }
 
-    const tokenCol = cols[headerKey_(CFG.TOKEN_HEADER)];
-    const statusCol = cols[headerKey_(CFG.EMAIL_STATUS_HEADER)];
-    const checkinCol = cols[headerKey_(CFG.CHECKIN_STATUS_HEADER)];
-    const timeCol = cols[headerKey_(CFG.CHECKIN_TIME_HEADER)];
-    const nameCol = cols[headerKey_(CFG.NAME_HEADER)];
-    const ticketCol = cols[headerKey_(CFG.TICKET_ID_HEADER)];
+      if (matchRow) {
+        const statusCol = cols[headerKey_(CFG.EMAIL_STATUS_HEADER)];
+        const emailStatus = String(sheet.getRange(matchRow, statusCol).getDisplayValue()).trim().toUpperCase();
+        if (emailStatus !== 'SENT') {
+          return { ok: false, code: 'NOT_ISSUED', message: 'This ticket has not been issued successfully.' };
+        }
 
-    const tokenValues = sheet.getRange(
-      2, tokenCol, sheet.getLastRow() - 1, 1
-    ).getDisplayValues();
+        const paymentCol = cols[headerKey_(CFG.PAYMENT_STATUS_HEADER)];
+        const paymentStatus = String(sheet.getRange(matchRow, paymentCol).getDisplayValue()).trim().toUpperCase() || 'PENDING';
+        if (paymentStatus !== 'CONFIRMED') {
+          return {
+            ok: false,
+            code: 'PAYMENT_PENDING',
+            message: 'PAYMENT VERIFICATION PENDING',
+            detail: 'Registration found, but entry is blocked until the organiser marks payment CONFIRMED.'
+          };
+        }
 
-    let matchIndex = -1;
+        const name = String(sheet.getRange(matchRow, cols[headerKey_(CFG.NAME_HEADER)]).getDisplayValue()).trim();
+        const ticketId = String(sheet.getRange(matchRow, cols[headerKey_(CFG.TICKET_ID_HEADER)]).getDisplayValue()).trim();
+        const checkinCol = cols[headerKey_(CFG.CHECKIN_STATUS_HEADER)];
+        const timeCol = cols[headerKey_(CFG.CHECKIN_TIME_HEADER)];
+        const previousStatus = String(sheet.getRange(matchRow, checkinCol).getDisplayValue()).trim().toUpperCase();
+        const previousTime = sheet.getRange(matchRow, timeCol).getValue();
 
-    for (let i = 0; i < tokenValues.length; i++) {
-      if (String(tokenValues[i][0]).trim() === qrToken) {
-        matchIndex = i;
-        break;
+        if (previousStatus === 'CHECKED IN') {
+          return {
+            ok: false, code: 'ALREADY_USED', message: 'ALREADY CHECKED IN',
+            name: name, ticketId: ticketId, checkedAt: formatCheckinTime_(previousTime)
+          };
+        }
+
+        const now = new Date();
+        sheet.getRange(matchRow, checkinCol).setValue('CHECKED IN');
+        sheet.getRange(matchRow, timeCol).setValue(now);
+        SpreadsheetApp.flush();
+        return {
+          ok: true, code: 'SUCCESS', message: 'CHECK-IN SUCCESSFUL',
+          name: name, ticketId: ticketId, checkedAt: formatCheckinTime_(now), testTicket: false
+        };
       }
     }
 
-    if (matchIndex === -1) {
-      return {
-        ok: false,
-        code: 'INVALID',
-        message: 'INVALID QR TICKET'
-      };
-    }
+    // If not a real attendee token, check the isolated functional-test register.
+    const testResult = checkInTestTicket_(ss, qrToken);
+    if (testResult) return testResult;
 
-    const row = matchIndex + 2;
-
-    const emailStatus = String(
-      sheet.getRange(row, statusCol).getDisplayValue()
-    ).trim().toUpperCase();
-
-    if (emailStatus !== 'SENT') {
-      return {
-        ok: false,
-        code: 'NOT_ISSUED',
-        message: 'This ticket has not been issued successfully.'
-      };
-    }
-
-    const paymentStatusCol = cols[headerKey_(CFG.PAYMENT_STATUS_HEADER)];
-    const paymentStatus = String(
-      sheet.getRange(row, paymentStatusCol).getDisplayValue()
-    ).trim().toUpperCase() || 'PENDING';
-
-    if (paymentStatus !== 'CONFIRMED') {
-      return {
-        ok: false,
-        code: 'PAYMENT_PENDING',
-        message: 'PAYMENT VERIFICATION PENDING',
-        detail: 'Registration found, but entry is blocked until the organiser marks payment CONFIRMED.'
-      };
-    }
-
-    const name = String(
-      sheet.getRange(row, nameCol).getDisplayValue()
-    ).trim();
-
-    const ticketId = String(
-      sheet.getRange(row, ticketCol).getDisplayValue()
-    ).trim();
-
-    const previousStatus = String(
-      sheet.getRange(row, checkinCol).getDisplayValue()
-    ).trim().toUpperCase();
-
-    const previousTime = sheet.getRange(row, timeCol).getValue();
-
-    if (previousStatus === 'CHECKED IN') {
-      return {
-        ok: false,
-        code: 'ALREADY_USED',
-        message: 'ALREADY CHECKED IN',
-        name: name,
-        ticketId: ticketId,
-        checkedAt: formatCheckinTime_(previousTime)
-      };
-    }
-
-    const now = new Date();
-
-    sheet.getRange(row, checkinCol).setValue('CHECKED IN');
-    sheet.getRange(row, timeCol).setValue(now);
-
-    return {
-      ok: true,
-      code: 'SUCCESS',
-      message: 'CHECK-IN SUCCESSFUL',
-      name: name,
-      ticketId: ticketId,
-      checkedAt: formatCheckinTime_(now)
-    };
+    return { ok: false, code: 'INVALID', message: 'INVALID QR TICKET' };
 
   } catch (error) {
-    Logger.log('Check-in error: ' + error.message);
-
-    return {
-      ok: false,
-      code: 'SYSTEM_ERROR',
-      message: 'System error. Contact the event lead.'
-    };
-
+    Logger.log('Check-in error: ' + (error && error.stack ? error.stack : error));
+    return { ok: false, code: 'SYSTEM_ERROR', message: 'System error. Contact the event lead.' };
   } finally {
     lock.releaseLock();
   }
 }
 
+/* Validates and consumes a QR token held in the isolated TFB Test Tickets tab. */
+function checkInTestTicket_(ss, qrToken) {
+  const testSheet = ss.getSheetByName('TFB Test Tickets');
+  if (!testSheet || testSheet.getLastRow() < 2) return null;
+
+  const testCols = getTestTicketColumnMap_(testSheet);
+  const tokenCol = testCols.TOKEN;
+  const tokenValues = testSheet.getRange(2, tokenCol, testSheet.getLastRow() - 1, 1).getDisplayValues();
+  let row = 0;
+
+  for (let i = 0; i < tokenValues.length; i++) {
+    if (String(tokenValues[i][0]).trim() === qrToken) {
+      row = i + 2;
+      break;
+    }
+  }
+  if (!row) return null;
+
+  const emailStatus = String(testSheet.getRange(row, testCols.EMAIL_STATUS).getDisplayValue()).trim().toUpperCase();
+  if (emailStatus !== 'SENT') {
+    return { ok: false, code: 'NOT_ISSUED', message: 'This test ticket has not been emailed successfully.' };
+  }
+
+  const currentStatus = String(testSheet.getRange(row, testCols.CHECKIN_STATUS).getDisplayValue()).trim().toUpperCase();
+  const name = String(testSheet.getRange(row, testCols.NAME).getDisplayValue()).trim();
+  const ticketId = String(testSheet.getRange(row, testCols.TICKET_ID).getDisplayValue()).trim();
+  const previousTime = testSheet.getRange(row, testCols.CHECKIN_TIME).getValue();
+
+  if (currentStatus === 'CHECKED IN') {
+    return {
+      ok: false,
+      code: 'ALREADY_USED',
+      message: 'TEST QR ALREADY SCANNED — TEST RECORD ONLY',
+      detail: 'This is an internal test ticket, not an attendee pass.',
+      name: name,
+      ticketId: ticketId,
+      checkedAt: formatCheckinTime_(previousTime),
+      testTicket: true
+    };
+  }
+
+  const now = new Date();
+  testSheet.getRange(row, testCols.CHECKIN_STATUS).setValue('CHECKED IN');
+  testSheet.getRange(row, testCols.CHECKIN_TIME).setValue(now);
+  SpreadsheetApp.flush();
+
+  return {
+    ok: true,
+    code: 'SUCCESS',
+    message: 'TEST CHECK-IN SUCCESSFUL — TEST RECORD ONLY',
+    detail: 'The scanner and spreadsheet connection worked. This test record is not an attendee registration or admission pass.',
+    name: name,
+    ticketId: ticketId,
+    checkedAt: formatCheckinTime_(now),
+    testTicket: true
+  };
+}
 
 /* Spreadsheet and column helpers. */
 
@@ -630,6 +697,10 @@ function getColumnMap_(sheet) {
 
   headers.forEach(function(header, index) {
     const key = headerKey_(header);
+    // The Google Form response sheet has two similar email columns:
+    // Column B is the signed-in Google account and Column D is the attendee's
+    // manually entered EMAIL ADDRESS. We intentionally keep the RIGHTMOST
+    // matching header so tickets go to Column D, not the form-owner account.
     if (key) map[key] = index + 1;
   });
 
@@ -728,12 +799,21 @@ function buildRegistrationEmail_(data) {
   const transactionRef = escapeHtml_(data.transactionRef || 'Not provided');
   const paymentStatus = String(data.paymentStatus || 'PENDING').toUpperCase();
   const paymentConfirmed = paymentStatus === 'CONFIRMED';
-  const paymentTitle = paymentConfirmed
-    ? 'PAYMENT VERIFIED'
-    : 'PAYMENT VERIFICATION PENDING';
-  const paymentMessage = paymentConfirmed
-    ? 'Your payment has been verified. Keep this email and present the QR below at entry.'
-    : 'We have received your registration. Our team will verify your transaction reference and payment screenshot. Entry is approved only after successful payment verification.';
+  const isTest = data.isTest === true;
+  const paymentTitle = isTest
+    ? 'INTERNAL SYSTEM TEST — NOT A PAYMENT CONFIRMATION'
+    : (paymentConfirmed ? 'PAYMENT VERIFIED' : 'PAYMENT VERIFICATION PENDING');
+  const paymentMessage = isTest
+    ? 'This email tests the official registration layout and QR check-in connection. The QR is linked to a separate internal test record. No payment has been received or verified, and this is not an attendee admission pass.'
+    : (paymentConfirmed
+      ? 'Your payment has been verified. Keep this email and present the QR below at entry.'
+      : 'We have received your registration. Our team will verify your transaction reference and payment screenshot. Entry is approved only after successful payment verification.');
+  const qrHeading = isTest ? 'QR SYSTEM TEST TICKET' : 'YOUR QR TICKET';
+  const qrInstruction = isTest
+    ? 'This QR is a functional scanner test linked to the separate TFB Test Tickets sheet. It is not an attendee pass and does not grant event admission.'
+    : (paymentConfirmed
+      ? 'Keep this QR private and show it to the authorised entry team. Your payment is verified; your ticket is eligible for check-in.'
+      : 'Keep this QR private and show it to the authorised entry team. This QR will not be accepted at entry until your payment is marked CONFIRMED by the organiser.');
 
   const plainBody =
     'TRUST FUND BABIES — EVENT REGISTRATION\n\n' +
@@ -748,9 +828,9 @@ function buildRegistrationEmail_(data) {
     'Pass price: ' + EVENT.PASS_PRICE + '\n' +
     'Transaction reference: ' + (data.transactionRef || 'Not provided') + '\n\n' +
     paymentTitle + '\n' + paymentMessage + '\n\n' +
-    'YOUR QR TICKET\n' +
+    qrHeading + '\n' +
     'Ticket ID: ' + (data.ticketId || '') + '\n' +
-    'Present the QR image in this email to the authorised entry staff. Keep it private and do not share it.\n\n' +
+    qrInstruction + '\n\n' +
     'Follow ' + EVENT.INSTAGRAM_LABEL + ': ' + EVENT.INSTAGRAM_URL + '\n\n' +
     'TFB — TRUST FUND BABIES\n' +
     'All confirmed passes are non-refundable. Please retain your transaction reference.';
@@ -817,12 +897,11 @@ function buildRegistrationEmail_(data) {
           <tr>
             <td style="padding:0 24px 24px;">
               <div style="border:1px solid #eadfe7;border-radius:10px;padding:18px;text-align:center;">
-                <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;color:${pink};">YOUR QR TICKET</div>
+                <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;color:${pink};">${qrHeading}</div>
                 <div style="margin-top:8px;font-size:13px;color:#635663;">Ticket ID: <strong style="color:#211521;">${ticketId}</strong></div>
                 <img src="cid:ticketQr" width="220" height="220" alt="Your unique registration QR code" style="display:block;width:220px;height:220px;max-width:100%;margin:14px auto 8px;border:0;">
                 <p style="margin:0;font-size:12px;line-height:1.6;color:#635663;">
-                  Keep this QR private and show it to the authorised entry team.
-                  ${paymentConfirmed ? 'Your payment is verified; your ticket is eligible for check-in.' : 'This QR will not be accepted at entry until your payment is marked CONFIRMED by the organiser.'}
+                  ${qrInstruction}
                 </p>
               </div>
             </td>
@@ -862,4 +941,135 @@ function emailDetailRow_(label, valueHtml) {
     '<td style="padding:9px 0;border-bottom:1px solid #eee3eb;color:#211521;vertical-align:top;">' +
     valueHtml + '</td>' +
     '</tr>';
+}
+
+/**
+ * Sends one official-style TFB email to Alizar with a FUNCTIONAL test QR.
+ * The test ticket is stored in a separate "TFB Test Tickets" sheet, not in
+ * the Google Form responses. checkInTicket() knows how to validate that sheet.
+ * The email is visually consistent with the real attendee email, but clearly
+ * states that it is a system test and not proof of payment or admission.
+ * This function sends only to the fixed address below.
+ */
+function sendOfficialTestTicketToAlizar() {
+  const recipient = 'alizarkhan6@gmail.com';
+  const guestName = 'Alizar Khan';
+  const testSheet = ensureTestTicketSheet_();
+  const cols = getTestTicketColumnMap_(testSheet);
+  const testKey = 'ALIZAR_EMAIL_QR_TEST';
+  let row = 0;
+
+  // Reuse one dedicated test row; never write into the Form Responses tab.
+  if (testSheet.getLastRow() >= 2) {
+    const keys = testSheet.getRange(2, cols.TEST_KEY, testSheet.getLastRow() - 1, 1).getDisplayValues();
+    const emails = testSheet.getRange(2, cols.EMAIL, testSheet.getLastRow() - 1, 1).getDisplayValues();
+    for (let i = 0; i < keys.length; i++) {
+      if (String(keys[i][0]).trim() === testKey && String(emails[i][0]).trim().toLowerCase() === recipient) {
+        row = i + 2;
+        break;
+      }
+    }
+  }
+  if (!row) row = testSheet.getLastRow() + 1;
+
+  // A fresh token is issued each time this test function is run.
+  const token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
+  const ticketId = 'TFB-TEST-' + token.substring(0, 8).toUpperCase();
+  const now = new Date();
+
+  testSheet.getRange(row, cols.TEST_KEY).setValue(testKey);
+  testSheet.getRange(row, cols.NAME).setValue(guestName);
+  testSheet.getRange(row, cols.EMAIL).setValue(recipient);
+  testSheet.getRange(row, cols.TICKET_ID).setValue(ticketId);
+  testSheet.getRange(row, cols.TOKEN).setValue(token);
+  testSheet.getRange(row, cols.EMAIL_STATUS).setValue('SENDING');
+  testSheet.getRange(row, cols.PAYMENT_STATUS).setValue('TEST ONLY — NO PAYMENT');
+  testSheet.getRange(row, cols.CHECKIN_STATUS).clearContent();
+  testSheet.getRange(row, cols.CHECKIN_TIME).clearContent();
+  testSheet.getRange(row, cols.CREATED_AT).setValue(now);
+  SpreadsheetApp.flush();
+
+  try {
+    const qrBlob = createQrImage_(token, ticketId);
+    const email = buildRegistrationEmail_({
+      name: guestName,
+      ticketId: ticketId,
+      transactionRef: 'INTERNAL TEST — NO PAYMENT RECORD',
+      paymentStatus: 'TEST',
+      isTest: true
+    });
+
+    const subject = 'DDLJ Diwali Sundowner — Registration & QR Ticket';
+    GmailApp.sendEmail(recipient, subject, email.plainBody, {
+      name: 'Trust Fund Babies',
+      htmlBody: email.htmlBody,
+      inlineImages: { ticketQr: qrBlob }
+    });
+
+    testSheet.getRange(row, cols.EMAIL_STATUS).setValue('SENT');
+    SpreadsheetApp.flush();
+    Logger.log('Functional TFB test ticket sent only to ' + recipient + ' | ' + ticketId);
+    notify_('Official-style email with a functional TEST QR sent only to ' + recipient + '. Scan it using the Apps Script scanner. It will show TEST CHECK-IN and will not create an attendee entry.');
+    return 'SENT';
+
+  } catch (error) {
+    const detail = String(error && error.message ? error.message : error).substring(0, 180);
+    testSheet.getRange(row, cols.EMAIL_STATUS).setValue('ERROR: ' + detail);
+    SpreadsheetApp.flush();
+    Logger.log('Alizar test email failed: ' + detail);
+    throw error;
+  }
+}
+
+/* Create or open the isolated functional-test register. */
+function ensureTestTicketSheet_() {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName('TFB Test Tickets');
+  const headers = [
+    'TEST KEY', 'FULL NAME', 'EMAIL ADDRESS', 'QR TICKET ID', 'QR TOKEN',
+    'TICKET EMAIL STATUS', 'PAYMENT STATUS', 'CHECK-IN STATUS', 'CHECK-IN TIME', 'CREATED AT'
+  ];
+
+  if (!sheet) sheet = ss.insertSheet('TFB Test Tickets');
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  } else {
+    const currentWidth = Math.max(sheet.getLastColumn(), 1);
+    const current = sheet.getRange(1, 1, 1, currentWidth).getDisplayValues()[0];
+    const seen = {};
+    current.forEach((h, i) => { if (headerKey_(h)) seen[headerKey_(h)] = i + 1; });
+    headers.forEach((h) => {
+      if (!seen[headerKey_(h)]) {
+        const nextCol = sheet.getLastColumn() + 1;
+        sheet.getRange(1, nextCol).setValue(h).setFontWeight('bold');
+        seen[headerKey_(h)] = nextCol;
+      }
+    });
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+/* Returns 1-based column indexes for the test-ticket register. */
+function getTestTicketColumnMap_(sheet) {
+  const headerMap = getColumnMap_(sheet);
+  const required = {
+    TEST_KEY: 'TEST KEY', NAME: 'FULL NAME', EMAIL: 'EMAIL ADDRESS',
+    TICKET_ID: 'QR TICKET ID', TOKEN: 'QR TOKEN', EMAIL_STATUS: 'TICKET EMAIL STATUS',
+    PAYMENT_STATUS: 'PAYMENT STATUS', CHECKIN_STATUS: 'CHECK-IN STATUS',
+    CHECKIN_TIME: 'CHECK-IN TIME', CREATED_AT: 'CREATED AT'
+  };
+  const result = {};
+  Object.keys(required).forEach((key) => {
+    result[key] = headerMap[headerKey_(required[key])];
+    if (!result[key]) throw new Error('Missing test-ticket header: ' + required[key]);
+  });
+  return result;
+}
+
+/* Backwards-compatible menu/function alias for the older preview name. */
+function sendPreviewEmailToAlizar() {
+  return sendOfficialTestTicketToAlizar();
 }
