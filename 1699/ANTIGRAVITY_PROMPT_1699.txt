@@ -1,0 +1,23 @@
+Read `TFB_1699_COUPLE_CONTEXT.md` in full before editing.
+
+Implement a completely separate Google Apps Script `Code.gs` backend for the second ₹1699 couple form, and make its tickets work through the existing shared Vercel QR scanner.
+
+The second response row is one couple with P1 and P2. Issue TWO independent unique QR tickets per couple: one to `EMAIL ADDRESS P1`, one to `EMAIL ADDRESS P2`. Give each guest their own token, ticket ID, email status, check-in status and check-in timestamp. The couple shares one order-level payment status and transaction reference; both guests are blocked until PAYMENT STATUS is CONFIRMED. Checking in P1 must not check in P2. Use `TFB1699-` as the prefix for every token from this second backend.
+
+Do not overwrite root `Code.gs` or the existing ₹999 backend. Create a separate deliverable at `apps-script-1699/Code.gs` for the user's separate Apps Script project named `1699-file`.
+
+Inspect current Git status, all repo files, current `api/checkin.js`, `.env.example`, and full second-sheet headers first. The second spreadsheet ID is not visible in the screenshots: verify the new Apps Script project is bound to the second sheet and store its active spreadsheet ID during setup. Never guess the ID or use the original ₹999 spreadsheet ID. Locate the response sheet using the required P1/P2 headers.
+
+Extend the current Vercel API with:
+- Existing backend: `TFB_APPS_SCRIPT_URL`, `TFB_API_SECRET`
+- New couple backend: `TFB_1699_APPS_SCRIPT_URL`, `TFB_1699_API_SECRET`
+- Prefix routing: `TFB1699-` to second backend; other existing tokens to first backend.
+- Health endpoint reports both backend health states separately.
+- Browser sends only `{action:'checkin', token, pin}`; Vercel adds the appropriate sharedSecret server-side.
+- Preserve timeouts, redirect handling, CORS/origin validation, safe JSON parsing, rate limits if already present, and fail-closed behaviour.
+
+Preserve the current Vercel scanner page, camera, design and UI. Do not create a second scanner page or use Apps Script HTML Service for the camera.
+
+The new standalone Apps Script backend must support: `setup1699QrCheckIn`, form-submit trigger, two separate emails, safe retries, payment menu actions, API secret/PIN setup, `doGet?action=health`, authenticated `doPost`, and scanner-compatible `checkInTicket`. Use ₹1699/couple, two guest names, 01 November 2026, Arunodaya Farms, 5 PM onwards, food excluded, @trustfbabies. Default payment to PENDING. Never send the three existing registrations automatically and do not run bulk emails while coding.
+
+Before edits, create a branch or backup. Preserve all uncommitted work. Run syntax and routing tests, inspect the diff, and document the manual Apps Script deployment and new Vercel environment variables. Do not commit, push, deploy, email participants, change real attendee records or claim live success without actual verification. Make edits directly in this workspace; do not respond with code snippets for me to paste manually.
