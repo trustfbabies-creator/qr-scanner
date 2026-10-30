@@ -1,65 +1,109 @@
 // api/checkin.js
 // Vercel Serverless Function — TFB QR Scanner Backend Proxy
-// Forwards verified requests to Google Apps Script doPost() without exposing secrets to the browser.
+// Hardened against CORS bypass, brute-force PIN attacks, PII leakage, and quota exhaustion.
+
+// In-memory sliding window rate limiter (per serverless instance)
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_REQUESTS_PER_WINDOW = 35; // Max 35 check-in attempts per minute per IP
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const record = rateLimitMap.get(ip) || [];
+  // Retain only requests within the active sliding window
+  const recentRequests = record.filter(timestamp => now - timestamp < RATE_LIMIT_WINDOW_MS);
+  
+  if (recentRequests.length >= MAX_REQUESTS_PER_WINDOW) {
+    return true;
+  }
+  
+  recentRequests.push(now);
+  rateLimitMap.set(ip, recentRequests);
+
+  // Periodic garbage collection for memory hygiene
+  if (rateLimitMap.size > 1000) {
+    for (const [key, timestamps] of rateLimitMap.entries()) {
+      if (timestamps.length === 0 || now - timestamps[timestamps.length - 1] > RATE_LIMIT_WINDOW_MS) {
+        rateLimitMap.delete(key);
+      }
+    }
+  }
+  return false;
+}
 
 export default async function handler(req, res) {
-  const allowedOriginSetting = process.env.TFB_ALLOWED_ORIGIN || 'https://qr-scanner-kappa-indol.vercel.app';
-  const requestOrigin = req.headers.origin || req.headers.referer || '';
+  // Extract client IP address from Vercel forward headers
+  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || 'unknown';
 
-  // Helper to validate origin
-  function isOriginAllowed(origin) {
-    if (!origin) return true; // Server-to-server or direct curl/health-checks
+  // Apply rate limiting
+  if (isRateLimited(clientIp)) {
+    return res.status(429).json({
+      ok: false,
+      code: 'RATE_LIMITED',
+      message: 'Too many requests. Please wait a moment before trying again.'
+    });
+  }
+
+  const configuredOrigin = process.env.TFB_ALLOWED_ORIGIN || 'https://qr-scanner-kappa-indol.vercel.app';
+  const requestOrigin = req.headers.origin || '';
+
+  // Strict origin verification: blocks third-party sites while allowing authorized project domains
+  function isOriginAuthorized(origin) {
+    if (!origin) return true; // Direct server-to-server or curl probes
     try {
-      const url = new URL(origin);
-      const host = url.origin;
-      if (host === allowedOriginSetting) return true;
-      // Allow local development and Vercel preview deployments
-      if (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname.endsWith('.vercel.app')) {
+      const parsed = new URL(origin);
+      // Exact match with configured primary origin
+      if (parsed.origin === configuredOrigin) return true;
+      
+      // Allow only this specific project's own Vercel domains (e.g. qr-scanner-*.vercel.app)
+      if (parsed.protocol === 'https:' && /^qr-scanner(-[a-z0-9]+)?\.vercel\.app$/i.test(parsed.hostname)) {
         return true;
       }
-    } catch (e) {}
+
+      // Localhost allowed strictly during development
+      if (process.env.NODE_ENV !== 'production' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')) {
+        return true;
+      }
+    } catch (_) {}
     return false;
   }
 
-  // Set standard security & CORS headers
-  if (requestOrigin && isOriginAllowed(requestOrigin)) {
+  // Set hardened security and CORS headers
+  if (requestOrigin && isOriginAuthorized(requestOrigin)) {
     try {
-      const parsed = new URL(requestOrigin);
-      res.setHeader('Access-Control-Allow-Origin', parsed.origin);
-    } catch (e) {
-      res.setHeader('Access-Control-Allow-Origin', allowedOriginSetting);
+      res.setHeader('Access-Control-Allow-Origin', new URL(requestOrigin).origin);
+    } catch (_) {
+      res.setHeader('Access-Control-Allow-Origin', configuredOrigin);
     }
   } else {
-    res.setHeader('Access-Control-Allow-Origin', allowedOriginSetting);
+    res.setHeader('Access-Control-Allow-Origin', configuredOrigin);
   }
 
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-Type, Date'
-  );
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
   // Reject unauthorized browser origins
-  if (req.headers.origin && !isOriginAllowed(req.headers.origin)) {
+  if (requestOrigin && !isOriginAuthorized(requestOrigin)) {
     return res.status(403).json({
       ok: false,
       code: 'FORBIDDEN_ORIGIN',
-      message: 'Requests from this origin are not permitted.'
+      message: 'Access denied: origin not authorized.'
     });
   }
 
   const APPS_SCRIPT_URL = process.env.TFB_APPS_SCRIPT_URL;
   const SHARED_SECRET = process.env.TFB_API_SECRET;
 
-  // 1. Health check endpoint: GET /api/checkin or GET /api/checkin?action=health
+  // 1. Health check endpoint (GET /api/checkin or /api/checkin?action=health)
   if (req.method === 'GET') {
     if (!APPS_SCRIPT_URL || !SHARED_SECRET) {
       return res.status(500).json({
@@ -85,20 +129,19 @@ export default async function handler(req, res) {
       let healthData;
       try {
         healthData = JSON.parse(text);
-      } catch (e) {
+      } catch (_) {
         return res.status(502).json({
           ok: false,
           backendReachable: false,
-          error: 'Apps Script returned non-JSON response during health check.',
-          preview: text.slice(0, 150)
+          error: 'Apps Script returned non-JSON during health check.'
         });
       }
 
       return res.status(200).json({
         ok: Boolean(healthData && healthData.ok),
         backendReachable: true,
-        service: healthData.service || 'TFB QR Check-In',
-        timestamp: healthData.timestamp || new Date().toISOString()
+        service: 'TFB QR Check-In',
+        timestamp: new Date().toISOString()
       });
 
     } catch (err) {
@@ -106,14 +149,24 @@ export default async function handler(req, res) {
       return res.status(502).json({
         ok: false,
         backendReachable: false,
-        error: isAbort ? 'Apps Script health check timed out (10s)' : (err.message || 'Apps Script unreachable')
+        error: isAbort ? 'Apps Script health check timed out' : 'Apps Script unreachable'
       });
     }
   }
 
-  // 2. Check-in endpoint: POST /api/checkin
+  // 2. Ticket check-in endpoint (POST /api/checkin)
   if (req.method !== 'POST') {
     return res.status(405).json({ ok: false, code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed' });
+  }
+
+  // Enforce JSON Content-Type
+  const contentType = req.headers['content-type'] || '';
+  if (!contentType.toLowerCase().includes('application/json')) {
+    return res.status(415).json({
+      ok: false,
+      code: 'UNSUPPORTED_MEDIA_TYPE',
+      message: 'Content-Type must be application/json'
+    });
   }
 
   const { action, token, pin } = req.body || {};
@@ -122,7 +175,7 @@ export default async function handler(req, res) {
     return res.status(400).json({
       ok: false,
       code: 'INVALID_ACTION',
-      message: 'Invalid or missing action. Expected "checkin".'
+      message: 'Invalid action. Expected "checkin".'
     });
   }
 
@@ -145,12 +198,12 @@ export default async function handler(req, res) {
     });
   }
 
-  // Enforce reasonable input limits to protect downstream Apps Script
+  // Strict input boundary limits
   if (cleanToken.length > 256 || cleanPin.length > 128) {
     return res.status(400).json({
       ok: false,
       code: 'PAYLOAD_TOO_LARGE',
-      message: 'Input exceeds maximum permitted length.'
+      message: 'Input exceeds maximum permitted size.'
     });
   }
 
@@ -158,7 +211,7 @@ export default async function handler(req, res) {
     return res.status(500).json({
       ok: false,
       code: 'CONFIG_ERROR',
-      message: 'Server configuration error: TFB_APPS_SCRIPT_URL or TFB_API_SECRET not set in Vercel environment.'
+      message: 'Server configuration error: upstream variables missing.'
     });
   }
 
@@ -190,16 +243,15 @@ export default async function handler(req, res) {
     let data;
     try {
       data = JSON.parse(rawResponseText);
-    } catch (jsonErr) {
+    } catch (_) {
+      // Do not leak raw HTML or internal Apps Script errors to the client
       return res.status(502).json({
         ok: false,
         code: 'SYSTEM_ERROR',
-        message: 'Google Apps Script returned an unexpected non-JSON response.',
-        detail: rawResponseText.slice(0, 200)
+        message: 'Google Apps Script returned an invalid response format.'
       });
     }
 
-    // Forward the JSON result safely to the client
     return res.status(200).json(data);
 
   } catch (err) {

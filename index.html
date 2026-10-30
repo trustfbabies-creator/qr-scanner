@@ -937,9 +937,12 @@ button, input {
     'pane-log': document.getElementById('pane-log')
   };
 
-  // --- PIN Configuration & State ---
+  // --- PIN Configuration & State (Session-only storage for security) ---
   function initPin() {
-    const savedPin = sessionStorage.getItem('TFB_STAFF_PIN') || localStorage.getItem('TFB_STAFF_PIN');
+    // Clear legacy localStorage if it exists
+    try { localStorage.removeItem('TFB_STAFF_PIN'); } catch (_) {}
+
+    const savedPin = sessionStorage.getItem('TFB_STAFF_PIN');
     if (savedPin) {
       ui['staff-pin'].value = savedPin;
       updatePinBadge(true);
@@ -973,11 +976,9 @@ button, input {
     const val = ui['staff-pin'].value.trim();
     if (val) {
       sessionStorage.setItem('TFB_STAFF_PIN', val);
-      localStorage.setItem('TFB_STAFF_PIN', val);
       updatePinBadge(true);
     } else {
       sessionStorage.removeItem('TFB_STAFF_PIN');
-      localStorage.removeItem('TFB_STAFF_PIN');
       updatePinBadge(false);
     }
     ui['pin-modal'].classList.remove('is-open');
