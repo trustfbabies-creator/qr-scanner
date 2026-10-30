@@ -1,4 +1,3 @@
-
 /*
  * TRUST FUND BABIES — QR TICKET & CHECK-IN
  *
