@@ -889,13 +889,20 @@ h3#result-title {
       if (response.ok && data.ok) {
         state.backendHealthy = true;
         setSystemStatus('Backend connected', true);
+        ui['system-status'].title = 'Connected to Google Apps Script backend';
       } else {
         state.backendHealthy = false;
-        setSystemStatus('Backend offline', false);
+        const err = data.error || 'Backend offline';
+        const label = err.includes('Missing environment')
+          ? 'Set Vercel Env Vars'
+          : (err.includes('timed out') ? 'Backend Timeout' : 'Backend offline');
+        setSystemStatus(label, false);
+        ui['system-status'].title = err;
       }
     } catch (e) {
       state.backendHealthy = false;
       setSystemStatus('Backend not connected', false);
+      ui['system-status'].title = e.message || 'Network error';
     }
   }
 
