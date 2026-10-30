@@ -1,0 +1,9 @@
+Read `ANTIGRAVITY_CONTEXT.md` in this repository completely before editing.
+
+Implement the Vercel QR-scanner integration from that context. Inspect the current Git state and files first, create a safe branch/backup, and preserve uncommitted user work. The current project is expected to have a single `index.html` with inline CSS/JS and a `Code.gs` Apps Script backend; verify rather than assuming separate frontend files exist.
+
+Implement a Vercel Node serverless endpoint at `api/checkin.js`. Change the frontend so camera startup works on the Vercel HTTPS origin without checking `google.script.run`, while both camera and manual token submissions call same-origin `/api/checkin`. The Vercel function must forward requests to the existing Apps Script `doPost()` using server-only `TFB_APPS_SCRIPT_URL` and `TFB_API_SECRET`; the browser sends only `{action:'checkin', token, pin}`. Add a real backend health check at `GET /api/checkin?action=health`.
+
+Reuse the existing Code.gs API contract and check-in/payment/duplicate logic. Preserve the existing TFB UI, CSS, HTML structure, element IDs, email and payment workflows. Do not rewrite all Code.gs or create a second doPost(). Ensure Apps Script Content Service redirects are handled server-side, parse only JSON responses, and fail closed on errors. Never expose or log secrets, staff PINs, tokens or request bodies.
+
+Run syntax checks and tests; inspect the final diff. Do not commit or push. Do not send bulk tickets or check in real attendee tickets. Follow all environment-variable, deployment, security and acceptance-test requirements in `ANTIGRAVITY_CONTEXT.md`. Report actual test results and remaining setup steps; do not claim live success without testing it.
