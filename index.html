@@ -1172,6 +1172,10 @@ h3#result-title {
 
     if (state.cameraActive) return;
 
+    ui['start-scanner'].disabled = true;
+    ui['start-scanner'].textContent = 'Starting…';
+    ui['scanner-caption'].textContent = 'Requesting camera access…';
+
     try {
       if (state.scanner) {
         try { await state.scanner.clear(); } catch (_) {}
@@ -1179,16 +1183,41 @@ h3#result-title {
       }
 
       state.scanner = new window.Html5Qrcode('qr-reader');
-      ui['scanner-caption'].textContent = 'Requesting camera access…';
-      ui['start-scanner'].disabled = true;
-      ui['start-scanner'].textContent = 'Starting…';
 
-      await state.scanner.start(
-        { facingMode: { ideal: "environment" } },
-        { fps: 12, qrbox: { width: 220, height: 220 }, aspectRatio: 1.0 },
-        (decodedText) => handleDecodedQr(decodedText),
-        () => {}
-      );
+      // 1. Enumerate connected cameras (triggers browser permission prompt if needed)
+      let cameraConfig = { facingMode: "environment" };
+      try {
+        const cameras = await window.Html5Qrcode.getCameras();
+        if (cameras && cameras.length > 0) {
+          // Prefer back/rear camera on mobile; otherwise use first available camera (front webcam on laptop)
+          const backCam = cameras.find(c => 
+            c.label.toLowerCase().includes('back') || 
+            c.label.toLowerCase().includes('rear') || 
+            c.label.toLowerCase().includes('environment')
+          );
+          cameraConfig = backCam ? backCam.id : cameras[0].id;
+        }
+      } catch (enumErr) {
+        console.warn('Camera enumeration error, falling back to facingMode constraint:', enumErr);
+      }
+
+      // 2. Start scanning with fallback for single-webcam laptops
+      try {
+        await state.scanner.start(
+          cameraConfig,
+          { fps: 12, qrbox: { width: 220, height: 220 } },
+          (decodedText) => handleDecodedQr(decodedText),
+          () => {}
+        );
+      } catch (firstErr) {
+        console.warn('First start attempt failed, falling back to user facing camera:', firstErr);
+        await state.scanner.start(
+          { facingMode: "user" },
+          { fps: 12, qrbox: { width: 220, height: 220 } },
+          (decodedText) => handleDecodedQr(decodedText),
+          () => {}
+        );
+      }
 
       state.cameraActive = true;
       ui['scanner-frame'].classList.add('is-active');
@@ -1200,13 +1229,33 @@ h3#result-title {
       console.error('Could not start QR scanner:', error);
       state.cameraActive = false;
       ui['scanner-frame'].classList.remove('is-active');
-      ui['scanner-caption'].textContent = 'Camera unavailable. Allow permissions in browser settings.';
       ui['start-scanner'].disabled = false;
       ui['start-scanner'].textContent = 'Start camera';
+
+      const errStr = String(error && (error.message || error.name || error) || '');
+      let errorTitle = 'Camera error';
+      let errorDetail = errStr;
+
+      if (errStr.includes('NotAllowedError') || errStr.includes('Permission') || errStr.includes('denied')) {
+        errorTitle = 'Camera permission blocked';
+        errorDetail = 'Click the lock or camera icon in your browser address bar and set Camera to "Allow". If on Windows, check Windows Settings > Privacy > Camera.';
+        ui['scanner-caption'].textContent = 'Camera permission blocked by browser.';
+      } else if (errStr.includes('NotFoundError') || errStr.includes('DevicesNotFoundError') || errStr.includes('Overconstrained')) {
+        errorTitle = 'No camera detected';
+        errorDetail = 'No webcam was detected on this computer. Open this URL on your mobile phone to scan tickets.';
+        ui['scanner-caption'].textContent = 'No camera found on this device.';
+      } else if (errStr.includes('NotReadableError') || errStr.includes('Could not start video') || errStr.includes('in use')) {
+        errorTitle = 'Camera is in use';
+        errorDetail = 'Another application (Zoom, Teams, Windows Camera, or another tab) is currently using your webcam.';
+        ui['scanner-caption'].textContent = 'Camera is busy in another application.';
+      } else {
+        ui['scanner-caption'].textContent = 'Camera error: ' + errStr;
+      }
+
       renderResult({
         code: 'SYSTEM_ERROR',
-        message: 'Camera permission denied',
-        detail: 'Allow camera permissions in browser settings and ensure HTTPS context.'
+        message: errorTitle,
+        detail: errorDetail
       });
     }
   }
