@@ -468,13 +468,17 @@ function checkInTicket(token, pin) {
     if (!sheet) throw new Error('Missing response sheet: ' + CFG.SHEET_NAME);
     const cols = ensureSystemColumns_(sheet);
 
-    // First check genuine form registrations.
+    // First check genuine form registrations (matches either QR TOKEN or QR TICKET ID).
     if (sheet.getLastRow() >= 2) {
       const tokenCol = cols[headerKey_(CFG.TOKEN_HEADER)];
+      const ticketIdCol = cols[headerKey_(CFG.TICKET_ID_HEADER)];
       const tokenValues = sheet.getRange(2, tokenCol, sheet.getLastRow() - 1, 1).getDisplayValues();
+      const ticketIdValues = ticketIdCol ? sheet.getRange(2, ticketIdCol, sheet.getLastRow() - 1, 1).getDisplayValues() : [];
       let matchRow = 0;
       for (let i = 0; i < tokenValues.length; i++) {
-        if (String(tokenValues[i][0]).trim() === qrToken) {
+        const rowToken = String(tokenValues[i][0]).trim();
+        const rowTicketId = ticketIdValues[i] ? String(ticketIdValues[i][0]).trim() : '';
+        if (rowToken === qrToken || (rowTicketId && rowTicketId.toUpperCase() === qrToken.toUpperCase())) {
           matchRow = i + 2;
           break;
         }
